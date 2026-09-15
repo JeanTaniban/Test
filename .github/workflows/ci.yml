@@ -13,7 +13,8 @@ jobs:
         with:
           node-version: 22
       - run: npm install --no-audit --no-fund
-      - run: bash -n scripts/termux-setup.sh scripts/termux-server.sh scripts/termux-watchdog.sh scripts/termux-diagnose.sh scripts/termux-debug.sh scripts/termux-supervise.sh
+      - run: bash -n scripts/termux-setup.sh scripts/termux-server.sh scripts/termux-watchdog.sh scripts/termux-diagnose.sh scripts/termux-debug.sh scripts/termux-supervise.sh scripts/termux-dns.sh
+      - run: bash -c 'source scripts/termux-dns.sh; system_dns_lookup localhost >/dev/null'
       - run: npm test
       - run: npm run typecheck
       - run: npm run build
