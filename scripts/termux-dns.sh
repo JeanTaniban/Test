@@ -48,8 +48,7 @@ wait_for_quick_tunnel_dns() {
   local doh_state="unknown"
 
   while (( elapsed <= max_seconds )); do
-    system_result="$(system_dns_lookup "$host" 2>&1 || true)"
-    if [[ -n "$system_result" && "$system_result" != EAI_* && "$system_result" != ENOTFOUND* ]]; then
+    if system_result="$(system_dns_lookup "$host" 2>&1)"; then
       printf '[%s] system DNS resolved host=%s addresses=%s after=%ss\n' "$log_prefix" "$host" "$system_result" "$elapsed"
       return 0
     fi
