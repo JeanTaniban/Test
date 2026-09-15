@@ -11,6 +11,7 @@ WATCHDOG_PID_FILE="$STATE_DIR/watchdog.pid"
 SERVER_LOG="$STATE_DIR/server.log"
 TUNNEL_LOG="$STATE_DIR/tunnel.log"
 WATCHDOG_LOG="$STATE_DIR/watchdog.log"
+SUPERVISOR_LOG="$STATE_DIR/supervisor.log"
 
 mkdir -p "$STATE_DIR"
 REPORT="$STATE_DIR/diagnostic-$(date '+%Y%m%d-%H%M%S').txt"
@@ -125,7 +126,7 @@ curl_probe() {
 
   section 'Matching processes'
   if command -v ps >/dev/null 2>&1; then
-    ps -A -o PID,PPID,STAT,ELAPSED,RSS,ARGS 2>&1 | grep -E '(^ *PID|node|cloudflared|termux-watchdog)' || true
+    ps -A -o PID,PPID,STAT,ELAPSED,RSS,ARGS 2>&1 | grep -E '(^ *PID|node|cloudflared|termux-watchdog|termux-supervise)' || true
   fi
 
   section 'Local health probe'
@@ -175,11 +176,14 @@ curl_probe() {
     am get-inactive com.termux 2>&1 || true
   fi
 
+  section 'Foreground supervisor trace'
+  tail -n 260 "$SUPERVISOR_LOG" 2>/dev/null || printf 'supervisor.log unavailable (run scripts/termux-debug.sh)\n'
+
   section 'Server log tail'
-  tail -n 120 "$SERVER_LOG" 2>/dev/null || printf 'server.log unavailable\n'
+  tail -n 220 "$SERVER_LOG" 2>/dev/null || printf 'server.log unavailable\n'
 
   section 'cloudflared log tail'
-  tail -n 180 "$TUNNEL_LOG" 2>/dev/null || printf 'tunnel.log unavailable\n'
+  tail -n 240 "$TUNNEL_LOG" 2>/dev/null || printf 'tunnel.log unavailable\n'
 
   section 'Watchdog log tail'
   tail -n 180 "$WATCHDOG_LOG" 2>/dev/null || printf 'watchdog.log unavailable\n'
