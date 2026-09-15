@@ -4,11 +4,14 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 STATE_DIR="$ROOT_DIR/.termux-golf"
 PORT="${PORT:-3000}"
+AUTO_OPEN_BROWSER="${AUTO_OPEN_BROWSER:-1}"
 SERVER_PID_FILE="$STATE_DIR/server.pid"
 TUNNEL_PID_FILE="$STATE_DIR/tunnel.pid"
 SERVER_LOG="$STATE_DIR/server.log"
 TUNNEL_LOG="$STATE_DIR/tunnel.log"
 ORIGIN="http://127.0.0.1:$PORT"
+SERVER_ENTRY="$ROOT_DIR/dist/server/apps/server/src/index.js"
+CLIENT_ENTRY="$ROOT_DIR/apps/client/dist/index.html"
 
 mkdir -p "$STATE_DIR"
 
@@ -78,10 +81,39 @@ wait_for_tunnel_url() {
 }
 
 build_if_needed() {
-  if [[ ! -f "$ROOT_DIR/dist/server/index.js" || ! -f "$ROOT_DIR/apps/client/dist/index.html" ]]; then
+  if [[ ! -f "$SERVER_ENTRY" || ! -f "$CLIENT_ENTRY" ]]; then
     echo "Build absent: compilation du projet..."
     (cd "$ROOT_DIR" && npm run build)
   fi
+}
+
+open_public_url() {
+  local url="$1"
+  echo "Ouverture du jeu dans le navigateur..."
+
+  # Prefer Chrome explicitly when installed. Android's Activity Manager is
+  # available from Termux without requiring the Termux:API application.
+  if command -v am >/dev/null 2>&1; then
+    if am start -a android.intent.action.VIEW -d "$url" -p com.android.chrome >/dev/null 2>&1; then
+      return 0
+    fi
+  fi
+
+  # Fall back to Termux's URL opener, then to Android's default VIEW handler.
+  if command -v termux-open-url >/dev/null 2>&1; then
+    if termux-open-url "$url" >/dev/null 2>&1; then
+      return 0
+    fi
+  fi
+
+  if command -v am >/dev/null 2>&1; then
+    if am start -a android.intent.action.VIEW -d "$url" >/dev/null 2>&1; then
+      return 0
+    fi
+  fi
+
+  echo "Impossible d'ouvrir automatiquement le navigateur. Ouvre manuellement : $url" >&2
+  return 0
 }
 
 start_server() {
@@ -125,9 +157,13 @@ start_server() {
   fi
 
   echo
-echo "Serveur pret."
-echo "URL publique : $url"
-echo "URL locale   : $ORIGIN"
+  echo "Serveur pret."
+  echo "URL publique : $url"
+  echo "URL locale   : $ORIGIN"
+
+  if [[ "$AUTO_OPEN_BROWSER" != "0" ]]; then
+    open_public_url "$url"
+  fi
 }
 
 stop_server() {
@@ -175,6 +211,16 @@ show_url() {
   echo "$url"
 }
 
+open_browser() {
+  local url
+  url="$(find_tunnel_url || true)"
+  if [[ -z "$url" ]]; then
+    echo "Aucune URL Cloudflare disponible. Lancez d'abord: bash scripts/termux-server.sh start" >&2
+    exit 1
+  fi
+  open_public_url "$url"
+}
+
 update_project() {
   stop_server
   cd "$ROOT_DIR"
@@ -189,13 +235,18 @@ usage() {
 Usage: bash scripts/termux-server.sh <commande>
 
 Commandes:
-  start    demarre Node puis Cloudflare Quick Tunnel
+  start    demarre Node + Cloudflare et ouvre le premier client dans Chrome
   stop     arrete le tunnel et le serveur
-  restart  redemarre les deux processus
+  restart  redemarre les deux processus et rouvre le navigateur
   status   affiche les PID, le healthcheck et l'URL
   logs     suit les logs Node + cloudflared
   url      affiche uniquement l'URL trycloudflare.com
+  open     ouvre l'URL courante dans Chrome / le navigateur Android
   update   git pull, reinstalle, rebuild puis redemarre
+
+Variables:
+  AUTO_OPEN_BROWSER=0  ne pas ouvrir automatiquement le navigateur au start
+  PORT=3000            changer le port local du serveur
 EOF
 }
 
@@ -206,6 +257,7 @@ case "${1:-}" in
   status) status_server ;;
   logs) show_logs ;;
   url) show_url ;;
+  open) open_browser ;;
   update) update_project ;;
   *) usage; exit 1 ;;
 esac
