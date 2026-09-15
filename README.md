@@ -64,15 +64,18 @@ Le gestionnaire :
 
 - démarre directement le processus Node sur `127.0.0.1:3000` et conserve son vrai PID ;
 - vérifie le `/health` local ;
-- démarre un Cloudflare Quick Tunnel ;
-- attend que Cloudflare attribue une URL ;
-- vérifie ensuite `https://...trycloudflare.com/health` depuis le téléphone ;
-- retente automatiquement le Quick Tunnel jusqu'à 3 fois si nécessaire ;
-- n'affiche **Serveur prêt** qu'une fois le tunnel public réellement joignable ;
-- ouvre alors cette URL dans Chrome si Chrome est disponible ;
-- sinon utilise le gestionnaire d'URL Android par défaut ;
+- démarre un seul Cloudflare Quick Tunnel ;
+- attend que Cloudflare attribue l'URL `trycloudflare.com` ;
+- attend le log `Registered tunnel connection`, qui confirme que le connecteur `cloudflared` est attaché au réseau Cloudflare ;
+- conserve ce tunnel tant que le processus et le connecteur restent actifs ;
+- effectue ensuite un probe HTTP public uniquement comme diagnostic non destructif ;
+- ouvre l'URL dans Chrome si Chrome est disponible, sinon via le gestionnaire d'URL Android ;
 - conserve les PID et logs dans `.termux-golf/` ;
 - demande un wake-lock Termux quand la commande est disponible.
+
+Le script ne détruit plus un tunnel correctement enregistré simplement parce qu'un `curl` vers l'URL publique ne répond pas immédiatement. Un Quick Tunnel peut prendre un court délai avant d'être joignable publiquement, et `cloudflared` gère lui-même les reconnexions du connecteur.
+
+Cloudflare indique également que Quick Tunnels ne sont pas compatibles avec un fichier `~/.cloudflared/config.yml` ou `~/.cloudflared/config.yaml`. Le script vérifie ce cas avant le démarrage et affiche une erreur explicite au lieu de lancer une configuration ambiguë.
 
 Pour désactiver l'ouverture automatique :
 
@@ -93,7 +96,7 @@ bash scripts/termux-server.sh stop
 bash scripts/termux-server.sh update
 ```
 
-`status` vérifie séparément le processus Node, `cloudflared`, le `/health` local et le `/health` public. `doctor` ajoute les dernières lignes des deux logs. `open` refuse d'ouvrir une URL Cloudflare qui ne répond pas. `update` arrête le serveur, effectue un `git pull --ff-only`, réinstalle les dépendances, rebuild puis redémarre.
+`status` vérifie séparément le processus Node, le processus `cloudflared`, l'enregistrement du connecteur, le `/health` local et le probe public. `doctor` ajoute la version de `cloudflared`, la détection d'un éventuel fichier de configuration incompatible et les dernières lignes des deux logs. `open` exige un connecteur Cloudflare enregistré, mais ne bloque pas uniquement sur un probe HTTP local. `update` arrête le serveur, effectue un `git pull --ff-only`, réinstalle les dépendances, rebuild puis redémarre.
 
 Pour utiliser un autre port :
 
@@ -129,14 +132,15 @@ bash scripts/termux-server.sh doctor
 Un état sain ressemble à :
 
 ```text
-Node         : actif (...)
-cloudflared  : actif (...)
-Health local : OK
-URL          : https://....trycloudflare.com
-Health public: OK
+Node          : actif (...)
+cloudflared   : actif (...)
+Connecteur CF : enregistre
+Health local  : OK
+URL           : https://....trycloudflare.com
+Health public : OK
 ```
 
-Si `Health local` est `OK` mais `Health public` est indisponible, le problème se situe entre `cloudflared` et le réseau Cloudflare. Si `Health local` est indisponible, consulter d'abord le log serveur affiché par `doctor`.
+`Connecteur CF : enregistre` est le signal principal côté tunnel. Si ce statut est bon mais que `Health public` indique encore `en propagation / probe local en echec`, le script conserve le même tunnel : attendre quelques secondes puis recharger la page est préférable à recréer une nouvelle URL.
 
 ### Android en arrière-plan
 

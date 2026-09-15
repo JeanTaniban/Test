@@ -81,25 +81,67 @@ wait_for_tunnel_url() {
   return 1
 }
 
-public_health_ok() {
-  local url="$1"
-  curl --silent --fail --location \
-    --connect-timeout 3 --max-time 6 \
-    "$url/health" 2>/dev/null | grep -q '"ok"[[:space:]]*:[[:space:]]*true'
+tunnel_registered() {
+  is_running "$TUNNEL_PID_FILE" \
+    && [[ -f "$TUNNEL_LOG" ]] \
+    && grep -q 'Registered tunnel connection' "$TUNNEL_LOG"
 }
 
-wait_for_public_health() {
-  local url="$1"
-  for _ in {1..60}; do
-    if ! is_running "$SERVER_PID_FILE" || ! is_running "$TUNNEL_PID_FILE"; then
-      return 1
-    fi
-    if public_health_ok "$url"; then
+wait_for_tunnel_registered() {
+  for _ in {1..90}; do
+    if tunnel_registered; then
       return 0
+    fi
+    if ! is_running "$TUNNEL_PID_FILE"; then
+      return 1
     fi
     sleep 0.5
   done
   return 1
+}
+
+public_health_ok() {
+  local url="$1"
+  curl --silent --fail --location \
+    --connect-timeout 2 --max-time 3 \
+    "$url/health" 2>/dev/null | grep -q '"ok"[[:space:]]*:[[:space:]]*true'
+}
+
+wait_for_public_health_soft() {
+  local url="$1"
+  for _ in {1..8}; do
+    if public_health_ok "$url"; then
+      return 0
+    fi
+    if ! tunnel_registered; then
+      return 1
+    fi
+    sleep 0.5
+  done
+  return 1
+}
+
+quick_tunnel_config_path() {
+  local path
+  for path in "$HOME/.cloudflared/config.yml" "$HOME/.cloudflared/config.yaml"; do
+    if [[ -f "$path" ]]; then
+      printf '%s\n' "$path"
+      return 0
+    fi
+  done
+  return 1
+}
+
+check_quick_tunnel_config() {
+  local config_path
+  config_path="$(quick_tunnel_config_path || true)"
+  if [[ -n "$config_path" ]]; then
+    echo "Erreur: Cloudflare ne supporte pas Quick Tunnel avec ce fichier present:" >&2
+    echo "  $config_path" >&2
+    echo "Renomme-le temporairement puis relance le serveur." >&2
+    return 1
+  fi
+  return 0
 }
 
 build_if_needed() {
@@ -135,8 +177,10 @@ open_public_url() {
   return 0
 }
 
-start_tunnel_once() {
+start_new_tunnel() {
   TUNNEL_URL=""
+  check_quick_tunnel_config
+
   : > "$TUNNEL_LOG"
   echo "Demarrage du Quick Tunnel Cloudflare..."
   nohup cloudflared tunnel --url "$ORIGIN" </dev/null >>"$TUNNEL_LOG" 2>&1 &
@@ -145,35 +189,47 @@ start_tunnel_once() {
   local url
   url="$(wait_for_tunnel_url || true)"
   if [[ -z "$url" ]]; then
+    echo "Erreur: cloudflared n'a pas fourni d'URL Quick Tunnel." >&2
+    tail -n 35 "$TUNNEL_LOG" >&2 || true
     return 1
   fi
 
   echo "Tunnel attribue : $url"
-  echo "Attente de la disponibilite publique..."
-  if ! wait_for_public_health "$url"; then
+  echo "Attente de l'enregistrement du connecteur Cloudflare..."
+  if ! wait_for_tunnel_registered; then
+    echo "Erreur: cloudflared n'a pas enregistre de connexion au reseau Cloudflare." >&2
+    echo "Le processus n'est pas tue automatiquement: cloudflared sait gerer ses reconnexions." >&2
+    tail -n 35 "$TUNNEL_LOG" >&2 || true
     return 1
   fi
 
   TUNNEL_URL="$url"
+  echo "Connecteur Cloudflare enregistre."
   return 0
 }
 
-start_tunnel() {
-  local attempt
-  for attempt in 1 2 3; do
-    if (( attempt > 1 )); then
-      echo "Nouvelle tentative Cloudflare ($attempt/3)..."
-    fi
-    if start_tunnel_once; then
-      return 0
+get_or_start_tunnel() {
+  TUNNEL_URL=""
+
+  if is_running "$TUNNEL_PID_FILE"; then
+    local url
+    url="$(find_tunnel_url || true)"
+    if [[ -n "$url" ]]; then
+      echo "cloudflared deja actif (PID $(read_pid "$TUNNEL_PID_FILE"))."
+      echo "Attente de l'enregistrement du connecteur existant..."
+      if wait_for_tunnel_registered; then
+        TUNNEL_URL="$url"
+        return 0
+      fi
     fi
 
-    echo "Le tunnel n'est pas devenu joignable." >&2
-    stop_pid "$TUNNEL_PID_FILE" "cloudflared" || true
-    tail -n 25 "$TUNNEL_LOG" >&2 || true
-    sleep 1
-  done
-  return 1
+    echo "cloudflared est actif mais pas encore enregistre." >&2
+    echo "Je le conserve au lieu de recreer un Quick Tunnel." >&2
+    echo "Diagnostic: bash scripts/termux-server.sh doctor" >&2
+    return 1
+  fi
+
+  start_new_tunnel
 }
 
 start_server() {
@@ -199,37 +255,27 @@ start_server() {
     exit 1
   fi
 
-  local url=""
-  if is_running "$TUNNEL_PID_FILE"; then
-    url="$(find_tunnel_url || true)"
-    if [[ -n "$url" ]] && public_health_ok "$url"; then
-      echo "Tunnel deja actif et joignable (PID $(read_pid "$TUNNEL_PID_FILE"))."
-    else
-      echo "Tunnel existant non joignable: redemarrage..."
-      stop_pid "$TUNNEL_PID_FILE" "cloudflared"
-      if ! start_tunnel; then
-        url=""
-      else
-        url="$TUNNEL_URL"
-      fi
-    fi
-  else
-    if start_tunnel; then
-      url="$TUNNEL_URL"
-    fi
-  fi
-
-  if [[ -z "$url" ]] || ! public_health_ok "$url"; then
-    echo "Erreur: aucun Quick Tunnel Cloudflare joignable n'a pu etre etabli." >&2
-    echo "Le serveur local reste disponible sur $ORIGIN" >&2
-    echo "Diagnostic: bash scripts/termux-server.sh doctor" >&2
+  if ! get_or_start_tunnel; then
+    echo "Le serveur local reste actif sur $ORIGIN." >&2
     exit 1
   fi
 
+  local url="$TUNNEL_URL"
+  local public_state="en propagation / diagnostic local non concluant"
+  if wait_for_public_health_soft "$url"; then
+    public_state="OK"
+  fi
+
   echo
-  echo "Serveur pret et tunnel verifie."
+  echo "Serveur pret. Connecteur Cloudflare enregistre."
   echo "URL publique : $url"
   echo "URL locale   : $ORIGIN"
+  echo "Health public: $public_state"
+
+  if [[ "$public_state" != "OK" ]]; then
+    echo "Note: le test HTTP depuis ce telephone n'a pas encore repondu." >&2
+    echo "Le tunnel reste lance; Cloudflare indique qu'un Quick Tunnel peut prendre un peu de temps a devenir joignable." >&2
+  fi
 
   if [[ "$AUTO_OPEN_BROWSER" != "0" ]]; then
     open_public_url "$url"
@@ -248,6 +294,7 @@ stop_server() {
 status_server() {
   local node_state="arrete"
   local tunnel_state="arrete"
+  local connector_state="non enregistre"
   local health_state="indisponible"
   local public_state="indisponible"
 
@@ -257,6 +304,9 @@ status_server() {
   if is_running "$TUNNEL_PID_FILE"; then
     tunnel_state="actif (PID $(read_pid "$TUNNEL_PID_FILE"))"
   fi
+  if tunnel_registered; then
+    connector_state="enregistre"
+  fi
   if curl --silent --fail --connect-timeout 2 --max-time 3 "$ORIGIN/health" >/dev/null 2>&1; then
     health_state="OK"
   fi
@@ -265,13 +315,16 @@ status_server() {
   url="$(find_tunnel_url || true)"
   if [[ -n "$url" ]] && public_health_ok "$url"; then
     public_state="OK"
+  elif [[ -n "$url" ]] && tunnel_registered; then
+    public_state="en propagation / probe local en echec"
   fi
 
-  echo "Node         : $node_state"
-  echo "cloudflared  : $tunnel_state"
-  echo "Health local : $health_state"
-  [[ -n "$url" ]] && echo "URL          : $url"
-  [[ -n "$url" ]] && echo "Health public: $public_state"
+  echo "Node          : $node_state"
+  echo "cloudflared   : $tunnel_state"
+  echo "Connecteur CF : $connector_state"
+  echo "Health local  : $health_state"
+  [[ -n "$url" ]] && echo "URL           : $url"
+  [[ -n "$url" ]] && echo "Health public : $public_state"
 }
 
 show_logs() {
@@ -296,8 +349,8 @@ open_browser() {
     echo "Aucune URL Cloudflare disponible. Lancez d'abord: bash scripts/termux-server.sh start" >&2
     exit 1
   fi
-  if ! public_health_ok "$url"; then
-    echo "Le tunnel existe mais n'est pas joignable actuellement." >&2
+  if ! tunnel_registered; then
+    echo "Le connecteur cloudflared n'est pas encore enregistre." >&2
     echo "Diagnostic: bash scripts/termux-server.sh doctor" >&2
     exit 1
   fi
@@ -307,18 +360,27 @@ open_browser() {
 doctor() {
   status_server
   echo
+  echo "cloudflared : $(cloudflared --version 2>/dev/null || echo 'indisponible')"
+  local config_path
+  config_path="$(quick_tunnel_config_path || true)"
+  if [[ -n "$config_path" ]]; then
+    echo "Config Quick Tunnel incompatible detectee: $config_path"
+  else
+    echo "Config Quick Tunnel: OK (aucun config.yml/config.yaml detecte)"
+  fi
+  echo
   echo "--- Dernieres lignes serveur ---"
   tail -n 25 "$SERVER_LOG" 2>/dev/null || true
   echo
   echo "--- Dernieres lignes cloudflared ---"
-  tail -n 35 "$TUNNEL_LOG" 2>/dev/null || true
+  tail -n 45 "$TUNNEL_LOG" 2>/dev/null || true
   echo
   if command -v termux-wake-lock >/dev/null 2>&1; then
-    echo "Wake-lock    : commande disponible"
+    echo "Wake-lock     : commande disponible"
   else
-    echo "Wake-lock    : commande absente"
+    echo "Wake-lock     : commande absente"
   fi
-  echo "Si Android coupe Termux en arriere-plan, autorise l'activite en arriere-plan et desactive l'optimisation batterie pour Termux."
+  echo "Un probe HTTP public en echec n'arrete jamais automatiquement un connecteur Cloudflare enregistre."
 }
 
 update_project() {
@@ -335,14 +397,14 @@ usage() {
 Usage: bash scripts/termux-server.sh <commande>
 
 Commandes:
-  start    demarre Node + Cloudflare, verifie le tunnel puis ouvre le navigateur
+  start    demarre Node + un Quick Tunnel et attend l'enregistrement Cloudflare
   stop     arrete le tunnel et le serveur
   restart  redemarre les deux processus et rouvre le navigateur
-  status   affiche les PID et les healthchecks local/public
-  doctor   affiche etat + derniers logs Node/cloudflared
+  status   affiche PID, enregistrement Cloudflare et healthchecks
+  doctor   affiche etat, version/config et derniers logs Node/cloudflared
   logs     suit les logs Node + cloudflared
   url      affiche uniquement l'URL trycloudflare.com
-  open     verifie puis ouvre l'URL courante dans Chrome / le navigateur Android
+  open     ouvre l'URL du tunnel enregistre dans Chrome / navigateur Android
   update   git pull, reinstalle, rebuild puis redemarre
 
 Variables:
