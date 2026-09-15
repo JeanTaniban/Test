@@ -14,7 +14,7 @@ jobs:
           node-version: 22
       - run: npm install --no-audit --no-fund
       - run: bash -n scripts/termux-setup.sh scripts/termux-server.sh scripts/termux-watchdog.sh scripts/termux-diagnose.sh scripts/termux-debug.sh scripts/termux-supervise.sh scripts/termux-dns.sh
-      - run: bash -c 'source scripts/termux-dns.sh; system_dns_lookup localhost >/dev/null'
+      - run: bash -c 'source scripts/termux-dns.sh; printf %s '"'"'{"Status":0,"Answer":[{"type":1,"data":"203.0.113.10"}]}'"'"' | parse_doh_ipv4 | grep -qx 203.0.113.10'
       - run: npm test
       - run: npm run typecheck
       - run: npm run build
