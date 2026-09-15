@@ -2,10 +2,9 @@
 # Sandbox-safe Quick Tunnel readiness helpers.
 # This file is meant to be sourced.
 #
-# Important: do not use the Termux/Android system resolver here. Some Termux
-# runtimes and language stacks have resolver behavior that differs from Chrome.
-# We query Cloudflare DNS over HTTPS through a literal IP and then use curl
-# --resolve to test the public HTTPS route without any local DNS lookup.
+# No readiness decision depends on Termux's local DNS resolver. Cloudflare DNS
+# is queried over ordinary HTTPS to a literal resolver IP, then the tunnel is
+# probed with curl --resolve so SNI/Host remain correct without a DNS lookup.
 
 CLOUDFLARE_DOH_HOST="cloudflare-dns.com"
 CLOUDFLARE_DOH_IP_PRIMARY="1.1.1.1"
@@ -24,16 +23,11 @@ cloudflare_doh_json() {
       return 0
     fi
   done
-
   return 1
 }
 
-cloudflare_doh_lookup_a() {
-  local host="$1"
-  local json
-  json="$(cloudflare_doh_json "$host" 2>/dev/null)" || return 1
-
-  printf '%s' "$json" | node -e '
+parse_doh_ipv4() {
+  node -e '
     let input = "";
     process.stdin.setEncoding("utf8");
     process.stdin.on("data", (chunk) => input += chunk);
@@ -52,6 +46,13 @@ cloudflare_doh_lookup_a() {
       }
     });
   '
+}
+
+cloudflare_doh_lookup_a() {
+  local host="$1"
+  local json
+  json="$(cloudflare_doh_json "$host" 2>/dev/null)" || return 1
+  printf '%s' "$json" | parse_doh_ipv4
 }
 
 public_health_via_ip() {
@@ -80,7 +81,6 @@ quick_tunnel_public_health() {
       return 0
     fi
   done <<< "$addresses"
-
   return 1
 }
 
@@ -90,7 +90,7 @@ wait_for_quick_tunnel_public_ready() {
   local log_prefix="${3:-READY}"
   local host="${url#https://}"
   host="${host%%/*}"
-  local elapsed=0 addresses="" healthy_ip=""
+  local elapsed=0 addresses="" ip
 
   while (( elapsed <= max_seconds )); do
     addresses="$(cloudflare_doh_lookup_a "$host" 2>/dev/null || true)"
@@ -98,9 +98,8 @@ wait_for_quick_tunnel_public_ready() {
       while IFS= read -r ip; do
         [[ -n "$ip" ]] || continue
         if public_health_via_ip "$url" "$ip"; then
-          healthy_ip="$ip"
           printf '[%s] public route ready host=%s edge_ip=%s after=%ss\n' \
-            "$log_prefix" "$host" "$healthy_ip" "$elapsed"
+            "$log_prefix" "$host" "$ip" "$elapsed"
           return 0
         fi
       done <<< "$addresses"
@@ -108,17 +107,37 @@ wait_for_quick_tunnel_public_ready() {
 
     if (( elapsed % 10 == 0 )); then
       if [[ -n "$addresses" ]]; then
-        printf '[%s] DNS published but /health not ready host=%s addresses=%q elapsed=%ss\n' \
+        printf '[%s] Cloudflare DNS published host=%s addresses=%q; waiting /health elapsed=%ss\n' \
           "$log_prefix" "$host" "$addresses" "$elapsed"
       else
-        printf '[%s] waiting Cloudflare DoH publication host=%s elapsed=%ss\n' \
+        printf '[%s] waiting Cloudflare DNS publication host=%s elapsed=%ss\n' \
           "$log_prefix" "$host" "$elapsed"
       fi
     fi
-
     sleep 2
     elapsed=$((elapsed + 2))
   done
-
   return 1
+}
+
+# Compatibility shims for scripts from missions 008 and earlier. Despite the
+# old names, these functions no longer use the Termux/system resolver.
+system_dns_lookup() {
+  cloudflare_doh_lookup_a "$1"
+}
+
+public_health_via_system_dns() {
+  quick_tunnel_public_health "$1" >/dev/null
+}
+
+public_health_via_cloudflare_doh() {
+  quick_tunnel_public_health "$1" >/dev/null
+}
+
+cloudflare_doh_supported() {
+  command -v curl >/dev/null 2>&1 && command -v node >/dev/null 2>&1
+}
+
+wait_for_quick_tunnel_dns() {
+  wait_for_quick_tunnel_public_ready "$@"
 }
