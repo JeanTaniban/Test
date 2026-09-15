@@ -51,7 +51,7 @@ stop_pid() {
 
 wait_for_health() {
   for _ in {1..30}; do
-    if curl --silent --fail "$ORIGIN/health" >/dev/null 2>&1; then
+    if curl --silent --fail --connect-timeout 2 --max-time 3 "$ORIGIN/health" >/dev/null 2>&1; then
       return 0
     fi
     sleep 0.5
@@ -80,6 +80,27 @@ wait_for_tunnel_url() {
   return 1
 }
 
+public_health_ok() {
+  local url="$1"
+  curl --silent --fail --location \
+    --connect-timeout 3 --max-time 6 \
+    "$url/health" 2>/dev/null | grep -q '"ok"[[:space:]]*:[[:space:]]*true'
+}
+
+wait_for_public_health() {
+  local url="$1"
+  for _ in {1..60}; do
+    if ! is_running "$SERVER_PID_FILE" || ! is_running "$TUNNEL_PID_FILE"; then
+      return 1
+    fi
+    if public_health_ok "$url"; then
+      return 0
+    fi
+    sleep 0.5
+  done
+  return 1
+}
+
 build_if_needed() {
   if [[ ! -f "$SERVER_ENTRY" || ! -f "$CLIENT_ENTRY" ]]; then
     echo "Build absent: compilation du projet..."
@@ -91,15 +112,12 @@ open_public_url() {
   local url="$1"
   echo "Ouverture du jeu dans le navigateur..."
 
-  # Prefer Chrome explicitly when installed. Android's Activity Manager is
-  # available from Termux without requiring the Termux:API application.
   if command -v am >/dev/null 2>&1; then
     if am start -a android.intent.action.VIEW -d "$url" -p com.android.chrome >/dev/null 2>&1; then
       return 0
     fi
   fi
 
-  # Fall back to Termux's URL opener, then to Android's default VIEW handler.
   if command -v termux-open-url >/dev/null 2>&1; then
     if termux-open-url "$url" >/dev/null 2>&1; then
       return 0
@@ -116,19 +134,61 @@ open_public_url() {
   return 0
 }
 
+start_tunnel_once() {
+  : > "$TUNNEL_LOG"
+  echo "Demarrage du Quick Tunnel Cloudflare..."
+  nohup cloudflared tunnel --url "$ORIGIN" </dev/null >>"$TUNNEL_LOG" 2>&1 &
+  echo "$!" > "$TUNNEL_PID_FILE"
+
+  local url
+  url="$(wait_for_tunnel_url || true)"
+  if [[ -z "$url" ]]; then
+    return 1
+  fi
+
+  echo "Tunnel attribue : $url"
+  echo "Attente de la disponibilite publique..."
+  if ! wait_for_public_health "$url"; then
+    return 1
+  fi
+
+  printf '%s\n' "$url"
+}
+
+start_tunnel() {
+  local attempt url
+  for attempt in 1 2 3; do
+    if (( attempt > 1 )); then
+      echo "Nouvelle tentative Cloudflare ($attempt/3)..."
+    fi
+    url="$(start_tunnel_once | tee /dev/stderr | tail -n 1)"
+    if [[ "$url" == https://*.trycloudflare.com ]] && public_health_ok "$url"; then
+      printf '%s\n' "$url"
+      return 0
+    fi
+
+    echo "Le tunnel n'est pas devenu joignable." >&2
+    stop_pid "$TUNNEL_PID_FILE" "cloudflared" || true
+    tail -n 25 "$TUNNEL_LOG" >&2 || true
+    sleep 1
+  done
+  return 1
+}
+
 start_server() {
   cd "$ROOT_DIR"
   build_if_needed
+
+  if command -v termux-wake-lock >/dev/null 2>&1; then
+    termux-wake-lock >/dev/null 2>&1 || true
+  fi
 
   if is_running "$SERVER_PID_FILE"; then
     echo "Serveur deja actif (PID $(read_pid "$SERVER_PID_FILE"))."
   else
     : > "$SERVER_LOG"
-    if command -v termux-wake-lock >/dev/null 2>&1; then
-      termux-wake-lock >/dev/null 2>&1 || true
-    fi
     echo "Demarrage du serveur sur $ORIGIN..."
-    nohup env PORT="$PORT" npm start >>"$SERVER_LOG" 2>&1 &
+    nohup env PORT="$PORT" npm start </dev/null >>"$SERVER_LOG" 2>&1 &
     echo "$!" > "$SERVER_PID_FILE"
   fi
 
@@ -138,26 +198,29 @@ start_server() {
     exit 1
   fi
 
+  local url
   if is_running "$TUNNEL_PID_FILE"; then
-    echo "Tunnel deja actif (PID $(read_pid "$TUNNEL_PID_FILE"))."
+    url="$(find_tunnel_url || true)"
+    if [[ -n "$url" ]] && public_health_ok "$url"; then
+      echo "Tunnel deja actif et joignable (PID $(read_pid "$TUNNEL_PID_FILE"))."
+    else
+      echo "Tunnel existant non joignable: redemarrage..."
+      stop_pid "$TUNNEL_PID_FILE" "cloudflared"
+      url="$(start_tunnel || true)"
+    fi
   else
-    : > "$TUNNEL_LOG"
-    echo "Demarrage du Quick Tunnel Cloudflare..."
-    nohup cloudflared tunnel --url "$ORIGIN" >>"$TUNNEL_LOG" 2>&1 &
-    echo "$!" > "$TUNNEL_PID_FILE"
+    url="$(start_tunnel || true)"
   fi
 
-  local url
-  url="$(wait_for_tunnel_url || true)"
-  if [[ -z "$url" ]]; then
-    echo "Le serveur local fonctionne, mais l'URL Cloudflare n'a pas ete obtenue." >&2
-    echo "Dernieres lignes cloudflared:" >&2
-    tail -n 30 "$TUNNEL_LOG" >&2 || true
+  if [[ -z "${url:-}" ]] || ! public_health_ok "$url"; then
+    echo "Erreur: aucun Quick Tunnel Cloudflare joignable n'a pu etre etabli." >&2
+    echo "Le serveur local reste disponible sur $ORIGIN" >&2
+    echo "Diagnostic: bash scripts/termux-server.sh doctor" >&2
     exit 1
   fi
 
   echo
-  echo "Serveur pret."
+  echo "Serveur pret et tunnel verifie."
   echo "URL publique : $url"
   echo "URL locale   : $ORIGIN"
 
@@ -176,24 +239,32 @@ stop_server() {
 }
 
 status_server() {
+  local node_state="arrete"
+  local tunnel_state="arrete"
+  local health_state="indisponible"
+  local public_state="indisponible"
+
   if is_running "$SERVER_PID_FILE"; then
-    echo "Node       : actif (PID $(read_pid "$SERVER_PID_FILE"))"
-  else
-    echo "Node       : arrete"
+    node_state="actif (PID $(read_pid "$SERVER_PID_FILE"))"
   fi
   if is_running "$TUNNEL_PID_FILE"; then
-    echo "cloudflared: actif (PID $(read_pid "$TUNNEL_PID_FILE"))"
-  else
-    echo "cloudflared: arrete"
+    tunnel_state="actif (PID $(read_pid "$TUNNEL_PID_FILE"))"
   fi
-  if curl --silent --fail "$ORIGIN/health" >/dev/null 2>&1; then
-    echo "Health     : OK"
-  else
-    echo "Health     : indisponible"
+  if curl --silent --fail --connect-timeout 2 --max-time 3 "$ORIGIN/health" >/dev/null 2>&1; then
+    health_state="OK"
   fi
+
   local url
   url="$(find_tunnel_url || true)"
+  if [[ -n "$url" ]] && public_health_ok "$url"; then
+    public_state="OK"
+  fi
+
+  echo "Node       : $node_state"
+  echo "cloudflared: $tunnel_state"
+  echo "Health local: $health_state"
   [[ -n "$url" ]] && echo "URL        : $url"
+  [[ -n "$url" ]] && echo "Health public: $public_state"
 }
 
 show_logs() {
@@ -218,7 +289,29 @@ open_browser() {
     echo "Aucune URL Cloudflare disponible. Lancez d'abord: bash scripts/termux-server.sh start" >&2
     exit 1
   fi
+  if ! public_health_ok "$url"; then
+    echo "Le tunnel existe mais n'est pas joignable actuellement." >&2
+    echo "Diagnostic: bash scripts/termux-server.sh doctor" >&2
+    exit 1
+  fi
   open_public_url "$url"
+}
+
+doctor() {
+  status_server
+  echo
+  echo "--- Dernieres lignes serveur ---"
+  tail -n 25 "$SERVER_LOG" 2>/dev/null || true
+  echo
+  echo "--- Dernieres lignes cloudflared ---"
+  tail -n 35 "$TUNNEL_LOG" 2>/dev/null || true
+  echo
+  if command -v termux-wake-lock >/dev/null 2>&1; then
+    echo "Wake-lock  : commande disponible"
+  else
+    echo "Wake-lock  : commande absente"
+  fi
+  echo "Si Android coupe Termux en arriere-plan, autorise l'activite en arriere-plan et desactive l'optimisation batterie pour Termux."
 }
 
 update_project() {
@@ -235,13 +328,14 @@ usage() {
 Usage: bash scripts/termux-server.sh <commande>
 
 Commandes:
-  start    demarre Node + Cloudflare et ouvre le premier client dans Chrome
+  start    demarre Node + Cloudflare, verifie le tunnel puis ouvre le navigateur
   stop     arrete le tunnel et le serveur
   restart  redemarre les deux processus et rouvre le navigateur
-  status   affiche les PID, le healthcheck et l'URL
+  status   affiche les PID et les healthchecks local/public
+  doctor   affiche etat + derniers logs Node/cloudflared
   logs     suit les logs Node + cloudflared
   url      affiche uniquement l'URL trycloudflare.com
-  open     ouvre l'URL courante dans Chrome / le navigateur Android
+  open     verifie puis ouvre l'URL courante dans Chrome / le navigateur Android
   update   git pull, reinstalle, rebuild puis redemarre
 
 Variables:
@@ -255,6 +349,7 @@ case "${1:-}" in
   stop) stop_server ;;
   restart) stop_server; start_server ;;
   status) status_server ;;
+  doctor) doctor ;;
   logs) show_logs ;;
   url) show_url ;;
   open) open_browser ;;
