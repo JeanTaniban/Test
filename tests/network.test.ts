@@ -1,6 +1,6 @@
 import type { AddressInfo } from 'node:net';
 import { afterEach, describe, expect, it } from 'vitest';
-import { WebSocket } from 'ws';
+import { WebSocket, type RawData } from 'ws';
 import { PROTOCOL_VERSION, type ServerMessage } from '../packages/shared/src/index';
 import { createGameServer } from '../apps/server/src/app';
 
@@ -12,33 +12,22 @@ function openSocket(url: string): Promise<WebSocket> {
   });
 }
 
-function nextMessage<T extends ServerMessage['type']>(
-  ws: WebSocket,
-  type: T,
-  timeoutMs = 2000,
-): Promise<Extract<ServerMessage, { type: T }>> {
+function nextMessage<T extends ServerMessage['type']>(ws: WebSocket, type: T, timeoutMs = 2000): Promise<Extract<ServerMessage, { type: T }>> {
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      cleanup();
-      reject(new Error(`Timeout waiting for ${type}`));
-    }, timeoutMs);
-    const onMessage = (data: WebSocket.RawData) => {
+    const timer = setTimeout(() => { cleanup(); reject(new Error(`Timeout waiting for ${type}`)); }, timeoutMs);
+    const onMessage = (data: RawData) => {
       const msg = JSON.parse(data.toString()) as ServerMessage;
       if (msg.type !== type) return;
       cleanup();
       resolve(msg as Extract<ServerMessage, { type: T }>);
     };
-    const cleanup = () => {
-      clearTimeout(timer);
-      ws.off('message', onMessage);
-    };
+    const cleanup = () => { clearTimeout(timer); ws.off('message', onMessage); };
     ws.on('message', onMessage);
   });
 }
 
 describe('websocket integration', () => {
   const resources: Array<() => Promise<void>> = [];
-
   afterEach(async () => {
     while (resources.length) await resources.pop()!();
   });
@@ -52,16 +41,12 @@ describe('websocket integration', () => {
 
     const a = await openSocket(url);
     const welcomeAPromise = nextMessage(a, 'welcome');
-    a.send(JSON.stringify({
-      type: 'join', protocol: PROTOCOL_VERSION, roomId: 'ROOM1', playerToken: 'token-player-a',
-    }));
+    a.send(JSON.stringify({ type: 'join', protocol: PROTOCOL_VERSION, roomId: 'ROOM1', playerToken: 'token-player-a' }));
     const welcomeA = await welcomeAPromise;
 
     const b = await openSocket(url);
     const welcomeBPromise = nextMessage(b, 'welcome');
-    b.send(JSON.stringify({
-      type: 'join', protocol: PROTOCOL_VERSION, roomId: 'ROOM1', playerToken: 'token-player-b',
-    }));
+    b.send(JSON.stringify({ type: 'join', protocol: PROTOCOL_VERSION, roomId: 'ROOM1', playerToken: 'token-player-b' }));
     const welcomeB = await welcomeBPromise;
     expect(welcomeB.state).toHaveLength(2);
 
@@ -79,9 +64,7 @@ describe('websocket integration', () => {
     await new Promise<void>((resolve) => a.once('close', () => resolve()));
     const reconnected = await openSocket(url);
     const reconnectPromise = nextMessage(reconnected, 'welcome');
-    reconnected.send(JSON.stringify({
-      type: 'join', protocol: PROTOCOL_VERSION, roomId: 'ROOM1', playerToken: 'token-player-a',
-    }));
+    reconnected.send(JSON.stringify({ type: 'join', protocol: PROTOCOL_VERSION, roomId: 'ROOM1', playerToken: 'token-player-a' }));
     const reconnectWelcome = await reconnectPromise;
     expect(reconnectWelcome.playerId).toBe(welcomeA.playerId);
     expect(reconnectWelcome.state).toHaveLength(2);
