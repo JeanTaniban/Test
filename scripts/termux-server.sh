@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 STATE_DIR="$ROOT_DIR/.termux-golf"
 PORT="${PORT:-3000}"
 AUTO_OPEN_BROWSER="${AUTO_OPEN_BROWSER:-1}"
+DNS_WAIT_SECONDS="${DNS_WAIT_SECONDS:-120}"
 SERVER_PID_FILE="$STATE_DIR/server.pid"
 TUNNEL_PID_FILE="$STATE_DIR/tunnel.pid"
 WATCHDOG_PID_FILE="$STATE_DIR/watchdog.pid"
@@ -16,9 +17,11 @@ SERVER_ENTRY="$ROOT_DIR/dist/server/apps/server/src/index.js"
 CLIENT_ENTRY="$ROOT_DIR/apps/client/dist/index.html"
 WATCHDOG_SCRIPT="$ROOT_DIR/scripts/termux-watchdog.sh"
 DIAG_SCRIPT="$ROOT_DIR/scripts/termux-diagnose.sh"
+DNS_HELPER="$ROOT_DIR/scripts/termux-dns.sh"
 TUNNEL_URL=""
 
 mkdir -p "$STATE_DIR"
+source "$DNS_HELPER"
 
 now() {
   date '+%Y-%m-%dT%H:%M:%S%z'
@@ -130,23 +133,22 @@ wait_for_tunnel_registered() {
   return 1
 }
 
-public_health_ok() {
+wait_for_public_health() {
   local url="$1"
-  curl --silent --fail --location \
-    --connect-timeout 2 --max-time 3 \
-    "$url/health" 2>/dev/null | grep -q '"ok"[[:space:]]*:[[:space:]]*true'
-}
-
-wait_for_public_health_soft() {
-  local url="$1"
-  for _ in {1..8}; do
-    if public_health_ok "$url"; then
+  local elapsed=0
+  while (( elapsed <= 60 )); do
+    if public_health_via_system_dns "$url"; then
       return 0
     fi
     if ! tunnel_registered; then
       return 1
     fi
-    sleep 0.5
+    if (( elapsed % 10 == 0 )); then
+      echo "Attente du /health public... ${elapsed}s"
+      event_log "waiting public health elapsed=${elapsed}s url=$url"
+    fi
+    sleep 2
+    elapsed=$((elapsed + 2))
   done
   return 1
 }
@@ -314,24 +316,40 @@ start_server() {
   fi
 
   local url="$TUNNEL_URL"
-  local public_state="en propagation / diagnostic local non concluant"
-  if wait_for_public_health_soft "$url"; then
-    public_state="OK"
-    event_log "public health OK url=$url"
-  else
-    event_log "public health inconclusive url=$url"
+  echo "Attente de la publication DNS du Quick Tunnel..."
+  if ! wait_for_quick_tunnel_dns "$url" "$DNS_WAIT_SECONDS" DNS; then
+    event_log "system DNS unresolved after ${DNS_WAIT_SECONDS}s url=$url"
+    echo >&2
+    if cloudflare_doh_supported && public_health_via_cloudflare_doh "$url"; then
+      echo "Erreur DNS locale: Cloudflare 1.1.1.1 voit le tunnel, mais le DNS Android/Termux ne le resout pas." >&2
+      echo "Le serveur et le tunnel restent actifs. Verifie Private DNS / bloqueur DNS / VPN sur Android." >&2
+      event_log "Cloudflare DoH healthy while system DNS unresolved"
+    else
+      echo "Le hostname trycloudflare.com n'est pas encore publiquement resolvable apres ${DNS_WAIT_SECONDS}s." >&2
+      echo "Le serveur et le tunnel restent actifs; aucune nouvelle URL n'est creee." >&2
+      event_log "Cloudflare DoH also not ready"
+    fi
+    echo "Chrome n'est pas ouvert avec un hostname non resolvable." >&2
+    echo "Diagnostic: bash scripts/termux-server.sh doctor" >&2
+    exit 1
   fi
+  event_log "system DNS ready url=$url"
+
+  echo "DNS OK. Attente de la reponse publique /health..."
+  if ! wait_for_public_health "$url"; then
+    event_log "public health unavailable despite DNS readiness url=$url"
+    echo "Erreur: le DNS resout le tunnel mais /health public n'est pas encore disponible." >&2
+    echo "Le tunnel reste actif. Diagnostic: bash scripts/termux-server.sh doctor" >&2
+    exit 1
+  fi
+  event_log "public health OK url=$url"
 
   echo
-  echo "Serveur pret. Connecteur Cloudflare enregistre."
+  echo "Serveur pret et URL publique verifiee."
   echo "URL publique : $url"
   echo "URL locale   : $ORIGIN"
-  echo "Health public: $public_state"
-
-  if [[ "$public_state" != "OK" ]]; then
-    echo "Note: le test HTTP depuis ce telephone n'a pas encore repondu." >&2
-    echo "Le tunnel reste lance; Cloudflare indique qu'un Quick Tunnel peut prendre un peu de temps a devenir joignable." >&2
-  fi
+  echo "DNS          : OK"
+  echo "Health public: OK"
 
   if [[ "$AUTO_OPEN_BROWSER" != "0" ]]; then
     open_public_url "$url"
@@ -366,6 +384,7 @@ status_server() {
   local watchdog_state="arrete"
   local connector_state="non enregistre"
   local health_state="indisponible"
+  local dns_state="indisponible"
   local public_state="indisponible"
 
   if is_running "$SERVER_PID_FILE"; then
@@ -384,12 +403,24 @@ status_server() {
     health_state="OK"
   fi
 
-  local url
+  local url host
   url="$(find_tunnel_url || true)"
-  if [[ -n "$url" ]] && public_health_ok "$url"; then
-    public_state="OK"
-  elif [[ -n "$url" ]] && tunnel_registered; then
-    public_state="en propagation / probe local en echec"
+  if [[ -n "$url" ]]; then
+    host="${url#https://}"
+    host="${host%%/*}"
+    if system_dns_lookup "$host" >/dev/null 2>&1; then
+      dns_state="OK"
+    elif cloudflare_doh_supported && public_health_via_cloudflare_doh "$url"; then
+      dns_state="echec local; 1.1.1.1 OK"
+    else
+      dns_state="non resolu"
+    fi
+
+    if public_health_via_system_dns "$url"; then
+      public_state="OK"
+    elif tunnel_registered; then
+      public_state="indisponible"
+    fi
   fi
 
   echo "Node          : $node_state"
@@ -398,6 +429,7 @@ status_server() {
   echo "Connecteur CF : $connector_state"
   echo "Health local  : $health_state"
   [[ -n "$url" ]] && echo "URL           : $url"
+  [[ -n "$url" ]] && echo "DNS URL       : $dns_state"
   [[ -n "$url" ]] && echo "Health public : $public_state"
 }
 
@@ -417,7 +449,7 @@ show_url() {
 }
 
 open_browser() {
-  local url
+  local url host
   url="$(find_tunnel_url || true)"
   if [[ -z "$url" ]]; then
     echo "Aucune URL Cloudflare disponible. Lancez d'abord: bash scripts/termux-server.sh start" >&2
@@ -426,6 +458,16 @@ open_browser() {
   if ! tunnel_registered; then
     echo "Le connecteur cloudflared n'est pas encore enregistre." >&2
     echo "Diagnostic: bash scripts/termux-server.sh doctor" >&2
+    exit 1
+  fi
+  host="${url#https://}"
+  host="${host%%/*}"
+  if ! system_dns_lookup "$host" >/dev/null 2>&1; then
+    echo "Le hostname $host n'est pas resolvable par Android/Termux; navigateur non ouvert." >&2
+    exit 1
+  fi
+  if ! public_health_via_system_dns "$url"; then
+    echo "Le hostname se resout mais /health public ne repond pas encore; navigateur non ouvert." >&2
     exit 1
   fi
   open_public_url "$url"
@@ -453,18 +495,19 @@ usage() {
 Usage: bash scripts/termux-server.sh <commande>
 
 Commandes:
-  start    demarre Node + Quick Tunnel + watchdog puis ouvre le navigateur
+  start    demarre Node + Quick Tunnel, attend DNS + /health public, puis ouvre Chrome
   stop     arrete watchdog, tunnel et serveur
   restart  redemarre tous les processus et rouvre le navigateur
-  status   affiche PID, watchdog, enregistrement Cloudflare et healthchecks
+  status   affiche processus, connecteur, DNS et healthchecks
   doctor   genere un rapport diagnostic complet et le sauvegarde dans .termux-golf/
   logs     suit en direct server.log + tunnel.log + watchdog.log
   url      affiche uniquement l'URL trycloudflare.com
-  open     ouvre l'URL du tunnel enregistre dans Chrome / navigateur Android
+  open     ouvre l'URL seulement si DNS et /health public sont prets
   update   git pull, reinstalle, rebuild puis redemarre
 
 Variables:
   AUTO_OPEN_BROWSER=0  ne pas ouvrir automatiquement le navigateur au start
+  DNS_WAIT_SECONDS=120 delai max de resolution DNS avant de rendre la main
   PORT=3000            changer le port local du serveur
 EOF
 }
