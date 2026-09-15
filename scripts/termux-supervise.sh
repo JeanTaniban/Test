@@ -12,6 +12,7 @@ SERVER_LOG="$STATE_DIR/server.log"
 TUNNEL_LOG="$STATE_DIR/tunnel.log"
 SERVER_PID_FILE="$STATE_DIR/server.pid"
 TUNNEL_PID_FILE="$STATE_DIR/tunnel.pid"
+NEW_LINE_COUNT=0
 
 mkdir -p "$STATE_DIR"
 
@@ -57,7 +58,7 @@ print_new_lines() {
   if (( current > previous )); then
     sed -n "$((previous + 1)),${current}p" "$file" | sed "s/^/[$prefix] /" | tee -a "$SUPERVISOR_LOG"
   fi
-  printf '%s\n' "$current"
+  NEW_LINE_COUNT="$current"
 }
 
 proc_summary() {
@@ -149,17 +150,18 @@ printf '=== MODE DEBUG: 60 secondes de surveillance active ===\n'
 printf 'URL: %s\n' "$url"
 printf 'Reviens dans Termux si Chrome affiche une erreur; la trace continue ici.\n\n'
 
+last_server_lines=0
+last_tunnel_lines=0
+print_new_lines "$SERVER_LOG" server "$last_server_lines"; last_server_lines="$NEW_LINE_COUNT"
+print_new_lines "$TUNNEL_LOG" cloudflared "$last_tunnel_lines"; last_tunnel_lines="$NEW_LINE_COUNT"
+
 if [[ "$AUTO_OPEN_BROWSER" != "0" ]]; then
   open_url "$url"
 fi
 
-last_server_lines=0
-last_tunnel_lines=0
 for second in $(seq 1 60); do
-  new_server="$(print_new_lines "$SERVER_LOG" server "$last_server_lines")"
-  last_server_lines="$(printf '%s\n' "$new_server" | tail -n 1)"
-  new_tunnel="$(print_new_lines "$TUNNEL_LOG" cloudflared "$last_tunnel_lines")"
-  last_tunnel_lines="$(printf '%s\n' "$new_tunnel" | tail -n 1)"
+  print_new_lines "$SERVER_LOG" server "$last_server_lines"; last_server_lines="$NEW_LINE_COUNT"
+  print_new_lines "$TUNNEL_LOG" cloudflared "$last_tunnel_lines"; last_tunnel_lines="$NEW_LINE_COUNT"
 
   if ! kill -0 "$server_pid" 2>/dev/null; then
     wait "$server_pid"; rc=$?
