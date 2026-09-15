@@ -1,3 +1,0 @@
-ChatGPT GitHub connector write test.
-Version: 2
-Update test successful.
