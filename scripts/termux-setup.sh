@@ -28,16 +28,19 @@ done
 echo "[3/4] Installation des dependances Node..."
 npm install --no-audit --no-fund
 
-echo "[4/4] Tests de type et build..."
+echo "[4/4] Tests de type, build et demarrage serveur..."
 npm run typecheck
 npm run build:client
 npm run build:server
+npm run smoke:server
 
 mkdir -p .termux-golf
 
 echo
 echo "Termux est pret."
 echo "Demarrage : bash scripts/termux-server.sh start"
+echo "            (ouvre automatiquement le premier client dans Chrome si disponible)"
 echo "Etat      : bash scripts/termux-server.sh status"
 echo "URL       : bash scripts/termux-server.sh url"
+echo "Navigateur: bash scripts/termux-server.sh open"
 echo "Arret     : bash scripts/termux-server.sh stop"
