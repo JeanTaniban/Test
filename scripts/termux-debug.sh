@@ -26,14 +26,15 @@ echo
 echo "Le mode debug va:"
 echo "  - lancer Node et cloudflared sous un superviseur"
 echo "  - attendre l'enregistrement Cloudflare"
-echo "  - comparer DNS Android/Termux et Cloudflare DoH"
-echo "  - attendre jusqu'a ${DNS_WAIT_SECONDS}s la resolution DNS systeme"
-echo "  - verifier /health public avant d'ouvrir Chrome"
+echo "  - NE PAS utiliser le resolver DNS local de Termux"
+echo "  - interroger Cloudflare DNS en HTTPS via 1.1.1.1"
+echo "  - tester /health avec curl --resolve, donc sans lookup DNS local"
+echo "  - ouvrir Chrome seulement quand la route publique Cloudflare repond"
 echo "  - surveiller ensuite 60 s les processus et requetes HTTP/WebSocket"
 echo "  - enregistrer .termux-golf/supervisor.log"
 echo
 
-echo "Chrome ne sera plus ouvert tant que le hostname trycloudflare.com n'est pas resolvable."
+echo "Ce test utilise uniquement des connexions HTTPS sortantes ordinaires depuis la sandbox Termux."
 echo
 
 exec env ROOT_DIR="$ROOT_DIR" STATE_DIR="$STATE_DIR" PORT="$PORT" \
