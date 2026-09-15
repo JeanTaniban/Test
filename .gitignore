@@ -1,6 +1,7 @@
 node_modules/
 dist/
 apps/client/dist/
+.termux-golf/
 .env
 .DS_Store
 *.log

@@ -2,6 +2,12 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { BALL_RADIUS, FIELD, HOLE, PROTOCOL_VERSION, type PlayerState, type ServerMessage } from '../../../packages/shared/src/index';
 
 type Frame = { at: number; players: PlayerState[] };
+type DragState = {
+  pointerId: number;
+  pointerType: string;
+  start: { x: number; y: number };
+  current: { x: number; y: number };
+};
 
 function roomFromPath(): string {
   const match = location.pathname.match(/^\/game\/([A-Za-z0-9_-]{1,32})/);
@@ -24,13 +30,14 @@ function playerToken(): string {
 export function App() {
   const roomId = useMemo(roomFromPath, []);
   const [status, setStatus] = useState('connexion…');
+  const [copyStatus, setCopyStatus] = useState('Copier le lien');
   const [me, setMe] = useState<string>();
   const [players, setPlayers] = useState<PlayerState[]>([]);
   const wsRef = useRef<WebSocket | null>(null);
   const frames = useRef<Frame[]>([]);
   const sequence = useRef(0);
   const canvas = useRef<HTMLCanvasElement>(null);
-  const drag = useRef<{ x: number; y: number } | null>(null);
+  const drag = useRef<DragState | null>(null);
 
   useEffect(() => {
     let retry: number | undefined;
@@ -127,6 +134,36 @@ export function App() {
         ctx.stroke();
       }
 
+      const gesture = drag.current;
+      const mine = displayed.find((player) => player.id === me);
+      if (gesture && mine && !mine.finished) {
+        const dx = gesture.start.x - gesture.current.x;
+        const dy = gesture.start.y - gesture.current.y;
+        const distance = Math.hypot(dx, dy);
+        const power = Math.min(1, distance / 180);
+        if (distance > 1) {
+          const length = 48 + power * 115;
+          const nx = dx / distance;
+          const ny = dy / distance;
+          ctx.save();
+          ctx.strokeStyle = '#ffd54a';
+          ctx.fillStyle = '#ffd54a';
+          ctx.lineWidth = 5;
+          ctx.lineCap = 'round';
+          ctx.setLineDash([10, 8]);
+          ctx.beginPath();
+          ctx.moveTo(mine.x + nx * (BALL_RADIUS + 5), mine.y + ny * (BALL_RADIUS + 5));
+          ctx.lineTo(mine.x + nx * length, mine.y + ny * length);
+          ctx.stroke();
+          ctx.setLineDash([]);
+          ctx.fillRect(18, FIELD.height - 28, (FIELD.width - 36) * power, 10);
+          ctx.strokeStyle = '#ffffffaa';
+          ctx.lineWidth = 2;
+          ctx.strokeRect(18, FIELD.height - 28, FIELD.width - 36, 10);
+          ctx.restore();
+        }
+      }
+
       animationFrame = requestAnimationFrame(render);
     };
 
@@ -143,20 +180,52 @@ export function App() {
   };
 
   const pointerDown = (event: React.PointerEvent<HTMLCanvasElement>) => {
+    if (drag.current) return;
     const point = toGamePoint(event);
     const mine = players.find((player) => player.id === me);
-    if (!mine || mine.finished || Math.hypot(point.x - mine.x, point.y - mine.y) > BALL_RADIUS * 2) return;
-    drag.current = point;
+    if (!mine || mine.finished) return;
+
+    const rect = event.currentTarget.getBoundingClientRect();
+    const touchRadius = Math.max(BALL_RADIUS * 4, 38 * FIELD.width / Math.max(rect.width, 1));
+    const hitRadius = event.pointerType === 'touch' ? touchRadius : BALL_RADIUS * 2;
+    if (Math.hypot(point.x - mine.x, point.y - mine.y) > hitRadius) return;
+
+    drag.current = {
+      pointerId: event.pointerId,
+      pointerType: event.pointerType,
+      start: point,
+      current: point,
+    };
+    event.preventDefault();
     event.currentTarget.setPointerCapture(event.pointerId);
   };
 
-  const pointerUp = (event: React.PointerEvent<HTMLCanvasElement>) => {
-    const start = drag.current;
+  const pointerMove = (event: React.PointerEvent<HTMLCanvasElement>) => {
+    const gesture = drag.current;
+    if (!gesture || gesture.pointerId !== event.pointerId) return;
+    gesture.current = toGamePoint(event);
+    event.preventDefault();
+  };
+
+  const cancelPointer = (event: React.PointerEvent<HTMLCanvasElement>) => {
+    if (drag.current?.pointerId !== event.pointerId) return;
     drag.current = null;
-    if (!start || !me) return;
-    const end = toGamePoint(event);
-    const dx = start.x - end.x;
-    const dy = start.y - end.y;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+  };
+
+  const pointerUp = (event: React.PointerEvent<HTMLCanvasElement>) => {
+    const gesture = drag.current;
+    if (!gesture || gesture.pointerId !== event.pointerId || !me) return;
+    gesture.current = toGamePoint(event);
+    drag.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+
+    const dx = gesture.start.x - gesture.current.x;
+    const dy = gesture.start.y - gesture.current.y;
     const distance = Math.hypot(dx, dy);
     if (distance < 5) return;
     wsRef.current?.send(JSON.stringify({
@@ -165,6 +234,17 @@ export function App() {
       angle: Math.atan2(dy, dx),
       power: Math.min(1, distance / 180),
     }));
+    if (gesture.pointerType === 'touch' && 'vibrate' in navigator) navigator.vibrate(12);
+  };
+
+  const copyLink = async () => {
+    try {
+      await navigator.clipboard.writeText(location.href);
+      setCopyStatus('Lien copié ✓');
+      window.setTimeout(() => setCopyStatus('Copier le lien'), 1600);
+    } catch {
+      window.prompt('Copiez le lien de la partie :', location.href);
+    }
   };
 
   const mine = players.find((player) => player.id === me);
@@ -172,17 +252,28 @@ export function App() {
 
   return <main>
     <header>
-      <div><h1>Multiplayer Golf</h1><span>{status} · room {roomId}</span></div>
-      <button onClick={() => navigator.clipboard.writeText(location.href)}>Copier le lien</button>
+      <div className="title-block">
+        <h1>Multiplayer Golf</h1>
+        <span>{status} · room {roomId}</span>
+      </div>
+      <button className="copy-button" type="button" onClick={copyLink}>{copyStatus}</button>
     </header>
-    <section className="game">
-      <canvas ref={canvas} onPointerDown={pointerDown} onPointerUp={pointerUp}/>
+    <section className="game" aria-label="Terrain de golf">
+      <canvas
+        ref={canvas}
+        onPointerDown={pointerDown}
+        onPointerMove={pointerMove}
+        onPointerUp={pointerUp}
+        onPointerCancel={cancelPointer}
+        onContextMenu={(event) => event.preventDefault()}
+      />
     </section>
-    <aside>
+    <aside className="hud">
       <strong>Coups : {mine?.shots ?? 0}</strong>
-      <span>{mine?.finished ? 'Terminé !' : 'Clique-glisse depuis votre balle pour tirer.'}</span>
+      <span>{mine?.finished ? 'Terminé !' : 'Tire en arrière depuis ta balle puis relâche.'}</span>
     </aside>
-    <ol>{sorted.map((player) => <li key={player.id}>
+    <p className="mobile-hint">Sur téléphone : pose le doigt près de ta balle, tire en arrière et relâche. Le trait jaune montre la direction et la puissance.</p>
+    <ol className="scoreboard">{sorted.map((player) => <li key={player.id}>
       {player.id === me ? 'Vous' : `Joueur ${player.id.slice(0, 4)}`} — {player.shots} coup(s)
       {player.finished ? ' ✓' : ''}{!player.connected ? ' (déconnecté)' : ''}
     </li>)}</ol>
