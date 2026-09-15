@@ -13,6 +13,7 @@ jobs:
         with:
           node-version: 22
       - run: npm install --no-audit --no-fund
+      - run: bash -n scripts/termux-setup.sh scripts/termux-server.sh
       - run: npm test
       - run: npm run typecheck
       - run: npm run build
