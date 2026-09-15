@@ -62,11 +62,14 @@ bash scripts/termux-server.sh start
 
 Le gestionnaire :
 
-- démarre le serveur Node sur `127.0.0.1:3000` ;
-- vérifie `/health` ;
+- démarre directement le processus Node sur `127.0.0.1:3000` et conserve son vrai PID ;
+- vérifie le `/health` local ;
 - démarre un Cloudflare Quick Tunnel ;
-- affiche l'URL publique `https://...trycloudflare.com` ;
-- ouvre automatiquement cette URL dans Chrome si Chrome est disponible ;
+- attend que Cloudflare attribue une URL ;
+- vérifie ensuite `https://...trycloudflare.com/health` depuis le téléphone ;
+- retente automatiquement le Quick Tunnel jusqu'à 3 fois si nécessaire ;
+- n'affiche **Serveur prêt** qu'une fois le tunnel public réellement joignable ;
+- ouvre alors cette URL dans Chrome si Chrome est disponible ;
 - sinon utilise le gestionnaire d'URL Android par défaut ;
 - conserve les PID et logs dans `.termux-golf/` ;
 - demande un wake-lock Termux quand la commande est disponible.
@@ -81,6 +84,7 @@ AUTO_OPEN_BROWSER=0 bash scripts/termux-server.sh start
 
 ```bash
 bash scripts/termux-server.sh status
+bash scripts/termux-server.sh doctor
 bash scripts/termux-server.sh url
 bash scripts/termux-server.sh open
 bash scripts/termux-server.sh logs
@@ -89,7 +93,7 @@ bash scripts/termux-server.sh stop
 bash scripts/termux-server.sh update
 ```
 
-`open` rouvre le client courant dans Chrome / le navigateur Android. `update` arrête le serveur, effectue un `git pull --ff-only`, réinstalle les dépendances, rebuild puis redémarre.
+`status` vérifie séparément le processus Node, `cloudflared`, le `/health` local et le `/health` public. `doctor` ajoute les dernières lignes des deux logs. `open` refuse d'ouvrir une URL Cloudflare qui ne répond pas. `update` arrête le serveur, effectue un `git pull --ff-only`, réinstalle les dépendances, rebuild puis redémarre.
 
 Pour utiliser un autre port :
 
@@ -103,12 +107,36 @@ Depuis le dossier `Test` :
 
 ```bash
 git pull --ff-only
-npm install --no-audit --no-fund
-bash scripts/termux-setup.sh
-bash scripts/termux-server.sh start
+bash scripts/termux-server.sh restart
+```
+
+Si les dépendances ou le build ont changé, utiliser plutôt :
+
+```bash
+bash scripts/termux-server.sh update
 ```
 
 Il n'est pas nécessaire de supprimer ou recloner le dépôt.
+
+### Diagnostic
+
+Si le navigateur indique que le site est inaccessible :
+
+```bash
+bash scripts/termux-server.sh doctor
+```
+
+Un état sain ressemble à :
+
+```text
+Node         : actif (...)
+cloudflared  : actif (...)
+Health local : OK
+URL          : https://....trycloudflare.com
+Health public: OK
+```
+
+Si `Health local` est `OK` mais `Health public` est indisponible, le problème se situe entre `cloudflared` et le réseau Cloudflare. Si `Health local` est indisponible, consulter d'abord le log serveur affiché par `doctor`.
 
 ### Android en arrière-plan
 
