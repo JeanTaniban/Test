@@ -50,7 +50,9 @@ cd Test
 bash scripts/termux-setup.sh
 ```
 
-Le script installe les outils nécessaires depuis les dépôts Termux (`nodejs-lts` ou `nodejs`, `git`, `curl`, `cloudflared`), installe les dépendances npm puis compile le client et le serveur.
+Le script installe les outils nécessaires depuis les dépôts Termux (`nodejs-lts` ou `nodejs`, `git`, `curl`, `cloudflared`), installe les dépendances npm, compile le client, compile le serveur avec TypeScript puis exécute un smoke test `/health` sur l'artefact serveur réellement produit.
+
+Le serveur n'utilise pas le CLI `esbuild` pour son build de production. Cette décision évite les incompatibilités du binaire natif esbuild observées sur Android/Termux. Vite reste utilisé pour compiler le client web.
 
 ### Démarrer le serveur + lien Cloudflare
 
@@ -64,27 +66,49 @@ Le gestionnaire :
 - vérifie `/health` ;
 - démarre un Cloudflare Quick Tunnel ;
 - affiche l'URL publique `https://...trycloudflare.com` ;
+- ouvre automatiquement cette URL dans Chrome si Chrome est disponible ;
+- sinon utilise le gestionnaire d'URL Android par défaut ;
 - conserve les PID et logs dans `.termux-golf/` ;
 - demande un wake-lock Termux quand la commande est disponible.
+
+Pour désactiver l'ouverture automatique :
+
+```bash
+AUTO_OPEN_BROWSER=0 bash scripts/termux-server.sh start
+```
 
 ### Commandes Termux
 
 ```bash
 bash scripts/termux-server.sh status
 bash scripts/termux-server.sh url
+bash scripts/termux-server.sh open
 bash scripts/termux-server.sh logs
 bash scripts/termux-server.sh restart
 bash scripts/termux-server.sh stop
 bash scripts/termux-server.sh update
 ```
 
-`update` arrête le serveur, effectue un `git pull --ff-only`, réinstalle les dépendances, rebuild puis redémarre.
+`open` rouvre le client courant dans Chrome / le navigateur Android. `update` arrête le serveur, effectue un `git pull --ff-only`, réinstalle les dépendances, rebuild puis redémarre.
 
 Pour utiliser un autre port :
 
 ```bash
 PORT=4000 bash scripts/termux-server.sh start
 ```
+
+### Mettre à jour une installation existante
+
+Depuis le dossier `Test` :
+
+```bash
+git pull --ff-only
+npm install --no-audit --no-fund
+bash scripts/termux-setup.sh
+bash scripts/termux-server.sh start
+```
+
+Il n'est pas nécessaire de supprimer ou recloner le dépôt.
 
 ### Android en arrière-plan
 
@@ -97,6 +121,7 @@ Aucun accès root n'est requis par les scripts.
 - `npm test` : tests physique, règles, protocole et intégration WebSocket à deux clients ;
 - `npm run typecheck` : vérification TypeScript ;
 - `npm run build` : client + serveur ;
+- `npm run smoke:server` : démarre l'artefact compilé et valide `/health` ;
 - `npm start` : serveur de production local.
 
 ## Cloudflare Quick Tunnel
