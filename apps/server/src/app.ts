@@ -61,8 +61,8 @@ export function createGameServer(options: GameServerOptions = {}) {
   server.on('upgrade', (req) => {
     diagnostic(`ws upgrade method=${req.method ?? '?'} url=${req.url ?? '?'} host=${req.headers.host ?? '?'} remote=${req.socket.remoteAddress ?? '?'} ua=${JSON.stringify(req.headers['user-agent'] ?? '')}`);
   });
-  server.on('clientError', (error, socket) => {
-    diagnostic(`http clientError error=${JSON.stringify(error.message)} remote=${socket.remoteAddress ?? '?'}`);
+  server.on('clientError', (error) => {
+    diagnostic(`http clientError error=${JSON.stringify(error.message)}`);
   });
   server.on('close', () => diagnostic('http server close event'));
 
