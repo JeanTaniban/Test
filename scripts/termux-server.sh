@@ -189,7 +189,7 @@ start_server() {
   else
     : > "$SERVER_LOG"
     echo "Demarrage du serveur sur $ORIGIN..."
-    nohup env PORT="$PORT" npm start </dev/null >>"$SERVER_LOG" 2>&1 &
+    nohup env PORT="$PORT" node "$SERVER_ENTRY" </dev/null >>"$SERVER_LOG" 2>&1 &
     echo "$!" > "$SERVER_PID_FILE"
   fi
 
