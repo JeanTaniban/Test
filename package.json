@@ -1,0 +1,35 @@
+{
+  "name": "multiplayer-golf",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently -k -n client,server \"npm:dev:client\" \"npm:dev:server\"",
+    "dev:client": "vite --config apps/client/vite.config.ts",
+    "dev:server": "tsx watch apps/server/src/index.ts",
+    "build": "npm run typecheck && npm run build:client && npm run build:server",
+    "build:client": "vite build --config apps/client/vite.config.ts",
+    "build:server": "esbuild apps/server/src/index.ts --bundle --platform=node --format=esm --packages=external --outfile=dist/server/index.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "start": "node dist/server/index.js"
+  },
+  "dependencies": {
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1",
+    "ws": "^8.18.3"
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.0",
+    "@types/react": "^19.1.12",
+    "@types/react-dom": "^19.1.9",
+    "@types/ws": "^8.18.1",
+    "@vitejs/plugin-react": "^5.0.2",
+    "concurrently": "^9.2.1",
+    "esbuild": "^0.25.9",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2",
+    "vite": "^7.1.5",
+    "vitest": "^3.2.4"
+  }
+}
