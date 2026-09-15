@@ -12,6 +12,7 @@ TUNNEL_LOG="$STATE_DIR/tunnel.log"
 ORIGIN="http://127.0.0.1:$PORT"
 SERVER_ENTRY="$ROOT_DIR/dist/server/apps/server/src/index.js"
 CLIENT_ENTRY="$ROOT_DIR/apps/client/dist/index.html"
+TUNNEL_URL=""
 
 mkdir -p "$STATE_DIR"
 
@@ -135,6 +136,7 @@ open_public_url() {
 }
 
 start_tunnel_once() {
+  TUNNEL_URL=""
   : > "$TUNNEL_LOG"
   echo "Demarrage du Quick Tunnel Cloudflare..."
   nohup cloudflared tunnel --url "$ORIGIN" </dev/null >>"$TUNNEL_LOG" 2>&1 &
@@ -152,18 +154,17 @@ start_tunnel_once() {
     return 1
   fi
 
-  printf '%s\n' "$url"
+  TUNNEL_URL="$url"
+  return 0
 }
 
 start_tunnel() {
-  local attempt url
+  local attempt
   for attempt in 1 2 3; do
     if (( attempt > 1 )); then
       echo "Nouvelle tentative Cloudflare ($attempt/3)..."
     fi
-    url="$(start_tunnel_once | tee /dev/stderr | tail -n 1)"
-    if [[ "$url" == https://*.trycloudflare.com ]] && public_health_ok "$url"; then
-      printf '%s\n' "$url"
+    if start_tunnel_once; then
       return 0
     fi
 
@@ -198,7 +199,7 @@ start_server() {
     exit 1
   fi
 
-  local url
+  local url=""
   if is_running "$TUNNEL_PID_FILE"; then
     url="$(find_tunnel_url || true)"
     if [[ -n "$url" ]] && public_health_ok "$url"; then
@@ -206,13 +207,19 @@ start_server() {
     else
       echo "Tunnel existant non joignable: redemarrage..."
       stop_pid "$TUNNEL_PID_FILE" "cloudflared"
-      url="$(start_tunnel || true)"
+      if ! start_tunnel; then
+        url=""
+      else
+        url="$TUNNEL_URL"
+      fi
     fi
   else
-    url="$(start_tunnel || true)"
+    if start_tunnel; then
+      url="$TUNNEL_URL"
+    fi
   fi
 
-  if [[ -z "${url:-}" ]] || ! public_health_ok "$url"; then
+  if [[ -z "$url" ]] || ! public_health_ok "$url"; then
     echo "Erreur: aucun Quick Tunnel Cloudflare joignable n'a pu etre etabli." >&2
     echo "Le serveur local reste disponible sur $ORIGIN" >&2
     echo "Diagnostic: bash scripts/termux-server.sh doctor" >&2
@@ -260,10 +267,10 @@ status_server() {
     public_state="OK"
   fi
 
-  echo "Node       : $node_state"
-  echo "cloudflared: $tunnel_state"
-  echo "Health local: $health_state"
-  [[ -n "$url" ]] && echo "URL        : $url"
+  echo "Node         : $node_state"
+  echo "cloudflared  : $tunnel_state"
+  echo "Health local : $health_state"
+  [[ -n "$url" ]] && echo "URL          : $url"
   [[ -n "$url" ]] && echo "Health public: $public_state"
 }
 
@@ -307,9 +314,9 @@ doctor() {
   tail -n 35 "$TUNNEL_LOG" 2>/dev/null || true
   echo
   if command -v termux-wake-lock >/dev/null 2>&1; then
-    echo "Wake-lock  : commande disponible"
+    echo "Wake-lock    : commande disponible"
   else
-    echo "Wake-lock  : commande absente"
+    echo "Wake-lock    : commande absente"
   fi
   echo "Si Android coupe Termux en arriere-plan, autorise l'activite en arriere-plan et desactive l'optimisation batterie pour Termux."
 }
