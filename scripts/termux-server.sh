@@ -7,14 +7,26 @@ PORT="${PORT:-3000}"
 AUTO_OPEN_BROWSER="${AUTO_OPEN_BROWSER:-1}"
 SERVER_PID_FILE="$STATE_DIR/server.pid"
 TUNNEL_PID_FILE="$STATE_DIR/tunnel.pid"
+WATCHDOG_PID_FILE="$STATE_DIR/watchdog.pid"
 SERVER_LOG="$STATE_DIR/server.log"
 TUNNEL_LOG="$STATE_DIR/tunnel.log"
+WATCHDOG_LOG="$STATE_DIR/watchdog.log"
 ORIGIN="http://127.0.0.1:$PORT"
 SERVER_ENTRY="$ROOT_DIR/dist/server/apps/server/src/index.js"
 CLIENT_ENTRY="$ROOT_DIR/apps/client/dist/index.html"
+WATCHDOG_SCRIPT="$ROOT_DIR/scripts/termux-watchdog.sh"
+DIAG_SCRIPT="$ROOT_DIR/scripts/termux-diagnose.sh"
 TUNNEL_URL=""
 
 mkdir -p "$STATE_DIR"
+
+now() {
+  date '+%Y-%m-%dT%H:%M:%S%z'
+}
+
+event_log() {
+  printf '[%s] %s\n' "$(now)" "$*" >> "$WATCHDOG_LOG"
+}
 
 read_pid() {
   local file="$1"
@@ -48,6 +60,24 @@ stop_pid() {
     fi
   fi
   rm -f "$file"
+}
+
+start_watchdog() {
+  if is_running "$WATCHDOG_PID_FILE"; then
+    return 0
+  fi
+  if [[ ! -f "$WATCHDOG_SCRIPT" ]]; then
+    return 0
+  fi
+
+  event_log "manager starting watchdog"
+  nohup env ROOT_DIR="$ROOT_DIR" STATE_DIR="$STATE_DIR" PORT="$PORT" ORIGIN="$ORIGIN" \
+    bash "$WATCHDOG_SCRIPT" </dev/null >>"$WATCHDOG_LOG" 2>&1 &
+  echo "$!" > "$WATCHDOG_PID_FILE"
+}
+
+stop_watchdog() {
+  stop_pid "$WATCHDOG_PID_FILE" "watchdog" || true
 }
 
 wait_for_health() {
@@ -154,25 +184,30 @@ build_if_needed() {
 open_public_url() {
   local url="$1"
   echo "Ouverture du jeu dans le navigateur..."
+  event_log "manager opening browser url=$url"
 
   if command -v am >/dev/null 2>&1; then
     if am start -a android.intent.action.VIEW -d "$url" -p com.android.chrome >/dev/null 2>&1; then
+      event_log "browser launch via Chrome intent succeeded"
       return 0
     fi
   fi
 
   if command -v termux-open-url >/dev/null 2>&1; then
     if termux-open-url "$url" >/dev/null 2>&1; then
+      event_log "browser launch via termux-open-url succeeded"
       return 0
     fi
   fi
 
   if command -v am >/dev/null 2>&1; then
     if am start -a android.intent.action.VIEW -d "$url" >/dev/null 2>&1; then
+      event_log "browser launch via generic Android intent succeeded"
       return 0
     fi
   fi
 
+  event_log "browser automatic launch failed"
   echo "Impossible d'ouvrir automatiquement le navigateur. Ouvre manuellement : $url" >&2
   return 0
 }
@@ -183,20 +218,25 @@ start_new_tunnel() {
 
   : > "$TUNNEL_LOG"
   echo "Demarrage du Quick Tunnel Cloudflare..."
+  event_log "manager starting cloudflared origin=$ORIGIN"
   nohup cloudflared tunnel --url "$ORIGIN" </dev/null >>"$TUNNEL_LOG" 2>&1 &
   echo "$!" > "$TUNNEL_PID_FILE"
+  event_log "cloudflared launched pid=$(read_pid "$TUNNEL_PID_FILE")"
 
   local url
   url="$(wait_for_tunnel_url || true)"
   if [[ -z "$url" ]]; then
+    event_log "cloudflared did not provide Quick Tunnel URL"
     echo "Erreur: cloudflared n'a pas fourni d'URL Quick Tunnel." >&2
     tail -n 35 "$TUNNEL_LOG" >&2 || true
     return 1
   fi
 
+  event_log "cloudflared assigned url=$url"
   echo "Tunnel attribue : $url"
   echo "Attente de l'enregistrement du connecteur Cloudflare..."
   if ! wait_for_tunnel_registered; then
+    event_log "cloudflared failed to reach Registered tunnel connection"
     echo "Erreur: cloudflared n'a pas enregistre de connexion au reseau Cloudflare." >&2
     echo "Le processus n'est pas tue automatiquement: cloudflared sait gerer ses reconnexions." >&2
     tail -n 35 "$TUNNEL_LOG" >&2 || true
@@ -204,6 +244,7 @@ start_new_tunnel() {
   fi
 
   TUNNEL_URL="$url"
+  event_log "cloudflared connector registered pid=$(read_pid "$TUNNEL_PID_FILE") url=$url"
   echo "Connecteur Cloudflare enregistre."
   return 0
 }
@@ -236,8 +277,12 @@ start_server() {
   cd "$ROOT_DIR"
   build_if_needed
 
+  printf '\n[%s] ===== START SESSION =====\n' "$(now)" >> "$WATCHDOG_LOG"
+  event_log "manager start requested commit=$(git rev-parse --short HEAD 2>/dev/null || echo unknown) port=$PORT"
+
   if command -v termux-wake-lock >/dev/null 2>&1; then
     termux-wake-lock >/dev/null 2>&1 || true
+    event_log "termux-wake-lock requested"
   fi
 
   if is_running "$SERVER_PID_FILE"; then
@@ -245,18 +290,26 @@ start_server() {
   else
     : > "$SERVER_LOG"
     echo "Demarrage du serveur sur $ORIGIN..."
-    nohup env PORT="$PORT" node "$SERVER_ENTRY" </dev/null >>"$SERVER_LOG" 2>&1 &
+    nohup env PORT="$PORT" SERVER_DIAGNOSTICS=1 node "$SERVER_ENTRY" </dev/null >>"$SERVER_LOG" 2>&1 &
     echo "$!" > "$SERVER_PID_FILE"
+    event_log "node launched pid=$(read_pid "$SERVER_PID_FILE") entry=$SERVER_ENTRY"
   fi
+
+  start_watchdog
 
   if ! wait_for_health; then
+    event_log "local health failed during startup"
     echo "Erreur: le serveur ne repond pas sur /health." >&2
-    tail -n 30 "$SERVER_LOG" >&2 || true
+    tail -n 40 "$SERVER_LOG" >&2 || true
+    echo "Diagnostic complet: bash scripts/termux-server.sh doctor" >&2
     exit 1
   fi
+  event_log "local health OK"
 
   if ! get_or_start_tunnel; then
+    event_log "tunnel startup/registration failed"
     echo "Le serveur local reste actif sur $ORIGIN." >&2
+    echo "Diagnostic complet: bash scripts/termux-server.sh doctor" >&2
     exit 1
   fi
 
@@ -264,6 +317,9 @@ start_server() {
   local public_state="en propagation / diagnostic local non concluant"
   if wait_for_public_health_soft "$url"; then
     public_state="OK"
+    event_log "public health OK url=$url"
+  else
+    event_log "public health inconclusive url=$url"
   fi
 
   echo
@@ -279,10 +335,23 @@ start_server() {
 
   if [[ "$AUTO_OPEN_BROWSER" != "0" ]]; then
     open_public_url "$url"
+    sleep 2
+    if ! is_running "$SERVER_PID_FILE"; then
+      event_log "ALERT node died within 2s after browser launch"
+      echo "ALERTE: le processus Node s'est arrete juste apres l'ouverture du navigateur." >&2
+      echo "Lance: bash scripts/termux-server.sh doctor" >&2
+    fi
+    if ! is_running "$TUNNEL_PID_FILE"; then
+      event_log "ALERT cloudflared died within 2s after browser launch"
+      echo "ALERTE: cloudflared s'est arrete juste apres l'ouverture du navigateur." >&2
+      echo "Lance: bash scripts/termux-server.sh doctor" >&2
+    fi
   fi
 }
 
 stop_server() {
+  event_log "manager stop requested"
+  stop_watchdog
   stop_pid "$TUNNEL_PID_FILE" "cloudflared"
   stop_pid "$SERVER_PID_FILE" "serveur Node"
   if command -v termux-wake-unlock >/dev/null 2>&1; then
@@ -294,6 +363,7 @@ stop_server() {
 status_server() {
   local node_state="arrete"
   local tunnel_state="arrete"
+  local watchdog_state="arrete"
   local connector_state="non enregistre"
   local health_state="indisponible"
   local public_state="indisponible"
@@ -303,6 +373,9 @@ status_server() {
   fi
   if is_running "$TUNNEL_PID_FILE"; then
     tunnel_state="actif (PID $(read_pid "$TUNNEL_PID_FILE"))"
+  fi
+  if is_running "$WATCHDOG_PID_FILE"; then
+    watchdog_state="actif (PID $(read_pid "$WATCHDOG_PID_FILE"))"
   fi
   if tunnel_registered; then
     connector_state="enregistre"
@@ -321,6 +394,7 @@ status_server() {
 
   echo "Node          : $node_state"
   echo "cloudflared   : $tunnel_state"
+  echo "Watchdog      : $watchdog_state"
   echo "Connecteur CF : $connector_state"
   echo "Health local  : $health_state"
   [[ -n "$url" ]] && echo "URL           : $url"
@@ -328,8 +402,8 @@ status_server() {
 }
 
 show_logs() {
-  touch "$SERVER_LOG" "$TUNNEL_LOG"
-  tail -n 80 -F "$SERVER_LOG" "$TUNNEL_LOG"
+  touch "$SERVER_LOG" "$TUNNEL_LOG" "$WATCHDOG_LOG"
+  tail -n 120 -F "$SERVER_LOG" "$TUNNEL_LOG" "$WATCHDOG_LOG"
 }
 
 show_url() {
@@ -358,29 +432,11 @@ open_browser() {
 }
 
 doctor() {
-  status_server
-  echo
-  echo "cloudflared : $(cloudflared --version 2>/dev/null || echo 'indisponible')"
-  local config_path
-  config_path="$(quick_tunnel_config_path || true)"
-  if [[ -n "$config_path" ]]; then
-    echo "Config Quick Tunnel incompatible detectee: $config_path"
-  else
-    echo "Config Quick Tunnel: OK (aucun config.yml/config.yaml detecte)"
+  if [[ ! -f "$DIAG_SCRIPT" ]]; then
+    echo "Script diagnostic absent: $DIAG_SCRIPT" >&2
+    exit 1
   fi
-  echo
-  echo "--- Dernieres lignes serveur ---"
-  tail -n 25 "$SERVER_LOG" 2>/dev/null || true
-  echo
-  echo "--- Dernieres lignes cloudflared ---"
-  tail -n 45 "$TUNNEL_LOG" 2>/dev/null || true
-  echo
-  if command -v termux-wake-lock >/dev/null 2>&1; then
-    echo "Wake-lock     : commande disponible"
-  else
-    echo "Wake-lock     : commande absente"
-  fi
-  echo "Un probe HTTP public en echec n'arrete jamais automatiquement un connecteur Cloudflare enregistre."
+  env ROOT_DIR="$ROOT_DIR" STATE_DIR="$STATE_DIR" PORT="$PORT" ORIGIN="$ORIGIN" bash "$DIAG_SCRIPT"
 }
 
 update_project() {
@@ -397,12 +453,12 @@ usage() {
 Usage: bash scripts/termux-server.sh <commande>
 
 Commandes:
-  start    demarre Node + un Quick Tunnel et attend l'enregistrement Cloudflare
-  stop     arrete le tunnel et le serveur
-  restart  redemarre les deux processus et rouvre le navigateur
-  status   affiche PID, enregistrement Cloudflare et healthchecks
-  doctor   affiche etat, version/config et derniers logs Node/cloudflared
-  logs     suit les logs Node + cloudflared
+  start    demarre Node + Quick Tunnel + watchdog puis ouvre le navigateur
+  stop     arrete watchdog, tunnel et serveur
+  restart  redemarre tous les processus et rouvre le navigateur
+  status   affiche PID, watchdog, enregistrement Cloudflare et healthchecks
+  doctor   genere un rapport diagnostic complet et le sauvegarde dans .termux-golf/
+  logs     suit en direct server.log + tunnel.log + watchdog.log
   url      affiche uniquement l'URL trycloudflare.com
   open     ouvre l'URL du tunnel enregistre dans Chrome / navigateur Android
   update   git pull, reinstalle, rebuild puis redemarre
